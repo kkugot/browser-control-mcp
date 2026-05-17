@@ -1,6 +1,6 @@
 import { MessageHandler } from "../message-handler";
 import { WebsocketClient } from "../client";
-import type { ServerMessageRequest } from "@browser-control-mcp/common";
+import type { ServerMessageRequest, TabContentExtensionMessage } from "@browser-control-mcp/common";
 import { ExtensionConfig } from "../extension-config";
 
 // Mock the WebsocketClient
@@ -437,6 +437,40 @@ describe("MessageHandler", () => {
           messageHandler.handleDecodedMessage(request)
         ).rejects.toThrow();
         expect(browser.tabs.executeScript).not.toHaveBeenCalled();
+      });
+
+      it("should truncate oversized tab content before sending it to the server", async () => {
+        // Arrange
+        const request: ServerMessageRequest = {
+          cmd: "get-tab-content",
+          tabId: 123,
+          correlationId: "test-correlation-id",
+        };
+
+        const mockTab = { id: 123, url: "https://example.com" };
+        (browser.tabs.get as jest.Mock).mockResolvedValue(mockTab);
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(true);
+
+        const oversizedText = "x".repeat(2_100_000);
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue([
+          {
+            links: [{ url: "https://example.com/page", text: "Page" }],
+            fullText: oversizedText,
+            isTruncated: false,
+            totalLength: oversizedText.length,
+          },
+        ]);
+
+        // Act
+        await messageHandler.handleDecodedMessage(request);
+
+        // Assert
+        const sentMessage = mockClient.sendResourceToServer.mock.calls[0][0] as TabContentExtensionMessage;
+        expect(sentMessage.resource).toBe("tab-content");
+        expect(sentMessage.isTruncated).toBe(true);
+        expect(sentMessage.fullText.length).toBeLessThan(oversizedText.length);
+        expect(sentMessage.fullText).toContain("truncated");
+        expect(JSON.stringify(sentMessage).length).toBeLessThanOrEqual(2_000_000);
       });
     });
 
