@@ -13,6 +13,7 @@ import * as crypto from "crypto";
 import type { BrowserApiOperation } from "./browser-operations";
 import {
   BROKER_PROTOCOL_VERSION,
+  type BrokerIdentity,
   type BrokerInfo,
   clearBrokerInfo,
   createBrokerIdentity,
@@ -65,11 +66,14 @@ interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
 
 export class BrowserAPI {
   private ws: WebSocket | null = null;
+  private extensionSockets: Set<WebSocket> = new Set();
   private wsServers: WebSocket.Server[] = [];
   private sharedSecret: string | null = null;
   private unavailableReason: string | null = null;
+  private brokerIdentity: BrokerIdentity | null = null;
   private brokerInfo: BrokerInfo | null = null;
   private brokerServer: ReturnType<typeof createBrokerServer> | null = null;
+  private selectedPort: number | null = null;
 
   // Map to persist the request to the extension. It maps the request correlationId
   // to a resolver, fulfulling a promise created when sending a message to the extension.
@@ -87,6 +91,8 @@ export class BrowserAPI {
     }
     this.sharedSecret = secret;
     const identity = createBrokerIdentity({ port, extensionSecret: secret });
+    this.brokerIdentity = identity;
+    this.selectedPort = port;
 
     if (await isPortInUse(port)) {
       const brokerInfo = readBrokerInfo(identity);
@@ -110,125 +116,40 @@ export class BrowserAPI {
       return;
     }
 
-    for (const host of getWebSocketHosts(Boolean(process.env.CONTAINERIZED))) {
-      const wsServer = new WebSocket.Server({
-        host,
-        port,
-      });
-
-      console.error(`Starting WebSocket server on ${host}:${port}`);
-      trace("WebSocket server binding", { host, port, debug: true });
-
-      wsServer.on("connection", async (connection, req) => {
-        const prevState = this.ws ? this.ws.readyState : "none";
-        this.ws = connection;
-
-        console.error("WebSocket connection established on port", port);
-        trace("Extension connected", {
-          remoteAddress: req.socket.remoteAddress,
-          previousSocketState: prevState,
-          pendingRequests: this.extensionRequestMap.size,
-        });
-
-        this.ws.on("message", (message) => {
-          let decoded: any;
-          try {
-            decoded = JSON.parse(message.toString());
-          } catch (parseErr) {
-            console.error("Failed to parse extension message:", parseErr);
-            trace("Message parse failure", {
-              rawLength: message.toString().length,
-              error: String(parseErr),
-            });
-            return;
-          }
-
-          if (isErrorMessage(decoded)) {
-            trace("Received extension error", {
-              correlationId: decoded.correlationId,
-              errorMessage: decoded.errorMessage,
-            });
-            this.handleExtensionError(decoded);
-            return;
-          }
-          const signature = this.createSignature(JSON.stringify(decoded.payload));
-          if (signature !== decoded.signature) {
-            console.error("Invalid message signature");
-            trace("Signature mismatch", {
-              correlationId: decoded.payload?.correlationId,
-              resource: decoded.payload?.resource,
-            });
-            return;
-          }
-          trace("Received valid extension message", {
-            correlationId: decoded.payload.correlationId,
-            resource: decoded.payload.resource,
-          });
-          this.handleDecodedExtensionMessage(decoded.payload);
-        });
-
-        this.ws.on("close", (code, reason) => {
-          console.error("WebSocket connection closed", { code, reason: reason.toString() });
-          trace("Extension socket closed", {
-            code,
-            reason: reason.toString(),
-            pendingRequests: this.extensionRequestMap.size,
-            pendingCorrelationIds: [...this.extensionRequestMap.keys()],
-          });
-        });
-
-        this.ws.on("error", (error) => {
-          console.error("WebSocket connection error:", error.message);
-          trace("Extension socket error", { error: error.message, stack: error.stack });
-        });
-      });
-      wsServer.on("error", (error) => {
-        console.error(`WebSocket server error on ${host}:${port}:`, error);
-        trace("Server-level WS error", { host, port, error: String(error) });
-      });
-
-      this.wsServers.push(wsServer);
-    }
-
-    const token = createBrokerToken();
-    const socketPath = getBrokerSocketPath(identity);
-    const info: BrokerInfo = {
-      pid: process.pid,
-      identity,
-      socketPath,
-      token,
-      protocolVersion: BROKER_PROTOCOL_VERSION,
-      startedAt: Date.now(),
-    };
-
-    this.brokerServer = createBrokerServer({
-      socketPath,
-      token,
-      handleOperation: (operation, args) => this.dispatchOperation(operation, args),
-    });
-    await this.brokerServer.start();
-    writeBrokerInfo(info);
-    this.brokerInfo = info;
+    await this.becomeLeader(identity, port);
   }
 
-  close() {
+  async close(): Promise<void> {
     if (this.brokerInfo?.pid === process.pid) {
       clearBrokerInfo(this.brokerInfo);
     }
 
-    this.brokerServer?.close().catch((error) => {
+    await Promise.all([...this.extensionSockets].map((socket) => new Promise<void>((resolve) => {
+      if (socket.readyState === WebSocket.CLOSED) {
+        resolve();
+        return;
+      }
+      socket.once("close", () => resolve());
+      socket.close(1001, "browser-control broker shutting down");
+    })));
+    this.extensionSockets.clear();
+    this.ws = null;
+
+    try {
+      await this.brokerServer?.close();
+    } catch (error) {
       console.error("Failed to close browser-control broker", error);
-    });
+    }
     this.brokerServer = null;
 
-    for (const wsServer of this.wsServers) {
-      wsServer.close();
-    }
+    await Promise.all(this.wsServers.map((wsServer) => new Promise<void>((resolve) => {
+      wsServer.close(() => resolve());
+    })));
     this.wsServers = [];
   }
 
   getSelectedPort() {
-    return this.wsServers[0]?.options.port;
+    return this.wsServers[0]?.options.port ?? this.selectedPort ?? undefined;
   }
 
   async openTab(url: string): Promise<number | undefined> {
@@ -385,6 +306,26 @@ export class BrowserAPI {
       throw new Error("Browser broker forwarding is not initialized");
     }
 
+    try {
+      return await this.forwardToCurrentBroker(operation, args);
+    } catch (error) {
+      trace("Cached broker request failed; attempting broker recovery", {
+        operation,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await this.recoverBrokerConnection();
+      if (this.isForwarding()) {
+        return await this.forwardToCurrentBroker(operation, args);
+      }
+      return await this.dispatchOperation(operation, args);
+    }
+  }
+
+  private async forwardToCurrentBroker(operation: BrowserApiOperation, args: unknown[]): Promise<unknown> {
+    if (!this.brokerInfo) {
+      throw new Error("Browser broker forwarding is not initialized");
+    }
+
     return await forwardToBroker({
       socketPath: this.brokerInfo.socketPath,
       token: this.brokerInfo.token,
@@ -392,6 +333,141 @@ export class BrowserAPI {
       args,
       timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
     });
+  }
+
+  private async recoverBrokerConnection(): Promise<void> {
+    if (!this.brokerIdentity || !this.selectedPort) {
+      throw new Error("Browser broker identity is not initialized");
+    }
+
+    const latestBrokerInfo = readBrokerInfo(this.brokerIdentity);
+    if (
+      latestBrokerInfo &&
+      await pingBroker({
+        socketPath: latestBrokerInfo.socketPath,
+        token: latestBrokerInfo.token,
+        timeoutMs: 1000,
+      })
+    ) {
+      this.brokerInfo = latestBrokerInfo;
+      return;
+    }
+
+    if (await isPortInUse(this.selectedPort)) {
+      throw new Error(
+        `Browser broker is unavailable and port ${this.selectedPort} is still in use. ` +
+          "Restart this MCP server session after the current owner exits."
+      );
+    }
+
+    await this.becomeLeader(this.brokerIdentity, this.selectedPort);
+  }
+
+  private async becomeLeader(identity: BrokerIdentity, port: number): Promise<void> {
+    for (const host of getWebSocketHosts(Boolean(process.env.CONTAINERIZED))) {
+      const wsServer = new WebSocket.Server({
+        host,
+        port,
+      });
+
+      console.error(`Starting WebSocket server on ${host}:${port}`);
+      trace("WebSocket server binding", { host, port, debug: true });
+
+      wsServer.on("connection", async (connection, req) => {
+        const prevState = this.ws ? this.ws.readyState : "none";
+        this.ws = connection;
+        this.extensionSockets.add(connection);
+
+        console.error("WebSocket connection established on port", port);
+        trace("Extension connected", {
+          remoteAddress: req.socket.remoteAddress,
+          previousSocketState: prevState,
+          pendingRequests: this.extensionRequestMap.size,
+        });
+
+        this.ws.on("message", (message) => {
+          let decoded: any;
+          try {
+            decoded = JSON.parse(message.toString());
+          } catch (parseErr) {
+            console.error("Failed to parse extension message:", parseErr);
+            trace("Message parse failure", {
+              rawLength: message.toString().length,
+              error: String(parseErr),
+            });
+            return;
+          }
+
+          if (isErrorMessage(decoded)) {
+            trace("Received extension error", {
+              correlationId: decoded.correlationId,
+              errorMessage: decoded.errorMessage,
+            });
+            this.handleExtensionError(decoded);
+            return;
+          }
+          const signature = this.createSignature(JSON.stringify(decoded.payload));
+          if (signature !== decoded.signature) {
+            console.error("Invalid message signature");
+            trace("Signature mismatch", {
+              correlationId: decoded.payload?.correlationId,
+              resource: decoded.payload?.resource,
+            });
+            return;
+          }
+          trace("Received valid extension message", {
+            correlationId: decoded.payload.correlationId,
+            resource: decoded.payload.resource,
+          });
+          this.handleDecodedExtensionMessage(decoded.payload);
+        });
+
+        this.ws.on("close", (code, reason) => {
+          this.extensionSockets.delete(connection);
+          if (this.ws === connection) {
+            this.ws = null;
+          }
+          console.error("WebSocket connection closed", { code, reason: reason.toString() });
+          trace("Extension socket closed", {
+            code,
+            reason: reason.toString(),
+            pendingRequests: this.extensionRequestMap.size,
+            pendingCorrelationIds: [...this.extensionRequestMap.keys()],
+          });
+        });
+
+        this.ws.on("error", (error) => {
+          console.error("WebSocket connection error:", error.message);
+          trace("Extension socket error", { error: error.message, stack: error.stack });
+        });
+      });
+      wsServer.on("error", (error) => {
+        console.error(`WebSocket server error on ${host}:${port}:`, error);
+        trace("Server-level WS error", { host, port, error: String(error) });
+      });
+
+      this.wsServers.push(wsServer);
+    }
+
+    const token = createBrokerToken();
+    const socketPath = getBrokerSocketPath(identity);
+    const info: BrokerInfo = {
+      pid: process.pid,
+      identity,
+      socketPath,
+      token,
+      protocolVersion: BROKER_PROTOCOL_VERSION,
+      startedAt: Date.now(),
+    };
+
+    this.brokerServer = createBrokerServer({
+      socketPath,
+      token,
+      handleOperation: (operation, args) => this.dispatchOperation(operation, args),
+    });
+    await this.brokerServer.start();
+    writeBrokerInfo(info);
+    this.brokerInfo = info;
   }
 
   private async dispatchOperation(operation: BrowserApiOperation, args: unknown[]): Promise<unknown> {

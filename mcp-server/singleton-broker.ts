@@ -105,6 +105,10 @@ export function clearBrokerInfo(expected: BrokerInfo): void {
   }
 }
 
+export function socketPathExists(socketPath: string): boolean {
+  return fs.existsSync(socketPath);
+}
+
 function respond(socket: net.Socket, response: BrokerResponse): void {
   socket.end(`${JSON.stringify(response)}\n`);
 }

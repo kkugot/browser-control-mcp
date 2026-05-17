@@ -113,3 +113,22 @@ test("broker IPC rejects unsupported operations", async () => {
     await server.close();
   }
 });
+
+test("broker server close removes the socket file before resolving", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  const identity = broker.createBrokerIdentity({ port: 18094, extensionSecret: "secret-a" });
+  const socketPath = broker.getBrokerSocketPath(identity);
+  const server = broker.createBrokerServer({
+    socketPath,
+    token: broker.createBrokerToken(),
+    handleOperation: async () => "ok",
+  });
+
+  await server.start();
+  assert.equal(await broker.socketPathExists(socketPath), true);
+  await server.close();
+  assert.equal(await broker.socketPathExists(socketPath), false);
+});
