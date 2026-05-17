@@ -1,0 +1,11 @@
+node_modules/
+*/node_modules/
+dist/
+*/dist/
+web-ext-artifacts/
+.git/
+.nx/
+.worktrees/
+*.dxt
+*.log
+.DS_Store

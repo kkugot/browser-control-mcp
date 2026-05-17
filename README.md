@@ -109,6 +109,16 @@ Alternatively, you can use a Docker-based configuration. To do so, build the mcp
 docker build -t browser-control-mcp .
 ```
 
+If your network requires a custom npm registry or TLS interception settings, pass
+them as build arguments:
+
+```
+docker build \
+  --build-arg NPM_REGISTRY=https://your-npm-registry.example/repository/npm-all/ \
+  --build-arg NPM_STRICT_SSL=false \
+  -t browser-control-mcp .
+```
+
 and use the following mcpServers configuration:
 
 ```json
@@ -129,4 +139,3 @@ and use the following mcpServers configuration:
     }
 }
 ```
-

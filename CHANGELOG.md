@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.5.6 - 2026-05-17
+
+### Fixed
+
+- Make Docker builds deterministic by installing from `package-lock.json`, excluding local build artifacts from the Docker context, making `common` a proper local package, and documenting registry build arguments. ([eyalzh/browser-control-mcp#39](https://github.com/eyalzh/browser-control-mcp/issues/39))
+
 ## 1.5.5 - 2026-05-17
 
 ### Fixed
