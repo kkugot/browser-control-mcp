@@ -76,6 +76,10 @@ Alternatively, to install a permanent add-on, you can install the [Browser Contr
 
 If you prefer not to run the extension on your personal Firefox browser, an alternative is to download a separate Firefox instance (such as Firefox Developer Edition, available at https://www.mozilla.org/en-US/firefox/developer/).
 
+#### Installing an unsigned XPI locally
+
+Download the `.xpi` from the GitHub Releases page. In Firefox Developer Edition, Nightly, ESR, or enterprise-managed Firefox, open `about:config`, set `xpinstall.signatures.required` to `false`, and if installation is still blocked set `xpinstall.whitelist.required` to `false`. Then open `about:addons` and choose "Install Add-on From File..." from the gear menu. Select the downloaded `.xpi`.
+
 
 #### MCP Server configuration
 
@@ -101,6 +105,12 @@ Replace `/path/to/repo` with the correct path.
 Set the EXTENSION_SECRET to the value shown on the extension's preferences page in Firefox (you can access it at `about:addons`). You can also set the EXTENSION_PORT environment variable to specify the port that the MCP server will use to communicate with the extension (default is 8089).
 
 It might take a few seconds for the MCP server to connect to the extension.
+
+##### Multiple MCP clients and browsers
+
+Browser Control MCP supports a local singleton broker mode. The first MCP server process configured for a browser opens the WebSocket connection to the Firefox extension and becomes the local broker. Additional MCP server processes with the same `EXTENSION_PORT` and `EXTENSION_SECRET` automatically forward browser tool calls to that broker, so multiple AI clients can share the same browser session without port conflicts.
+
+To use a separate browser profile or a different Firefox installation, configure that browser extension with a different port and secret, then use those values in that MCP client's environment. Broker identity is based on `EXTENSION_PORT` plus a hash of `EXTENSION_SECRET`, so different browser port/key pairs stay isolated.
 
 ##### Configure the MCP server with Docker
 
