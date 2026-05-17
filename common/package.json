@@ -1,6 +1,6 @@
 {
   "name": "@browser-control-mcp/common",
-  "version": "1.5.6",
+  "version": "1.5.7",
   "private": true,
   "types": "index.ts"
 }

@@ -1,6 +1,6 @@
 {
   "name": "firefox-extension",
-  "version": "1.5.6",
+  "version": "1.5.7",
   "main": "dist/background.js",
   "scripts": {
     "build": "npm run build:js && npm run package:xpi",
