@@ -31,6 +31,13 @@ export function getWebSocketHosts(isContainerized: boolean): string[] {
   return isContainerized ? ["0.0.0.0"] : ["127.0.0.1", "::1"];
 }
 
+export function buildPortInUseMessage(port: number): string {
+  return (
+    `browser-control: port ${port} is already in use, likely by another MCP client session. ` +
+    "Browser tools are unavailable in this session. Close the other session or stop its browser-control process to use this one."
+  );
+}
+
 interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
   resource: T;
   resolve: (value: Extract<ExtensionMessage, { resource: T }>) => void;
@@ -41,6 +48,7 @@ export class BrowserAPI {
   private ws: WebSocket | null = null;
   private wsServers: WebSocket.Server[] = [];
   private sharedSecret: string | null = null;
+  private unavailableReason: string | null = null;
 
   // Map to persist the request to the extension. It maps the request correlationId
   // to a resolver, fulfulling a promise created when sending a message to the extension.
@@ -59,9 +67,9 @@ export class BrowserAPI {
     this.sharedSecret = secret;
 
     if (await isPortInUse(port)) {
-      throw new Error(
-        `Configured port ${port} is already in use. Please configure a different port.`
-      );
+      this.unavailableReason = buildPortInUseMessage(port);
+      console.error(this.unavailableReason);
+      return;
     }
 
     for (const host of getWebSocketHosts(Boolean(process.env.CONTAINERIZED))) {
@@ -287,6 +295,10 @@ export class BrowserAPI {
   }
 
   private async waitForWebSocketOpen(): Promise<void> {
+    if (this.unavailableReason) {
+      throw new Error(this.unavailableReason);
+    }
+
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
     }

@@ -1,6 +1,6 @@
 {
   "name": "browser-control-mcp",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "private": true,
   "scripts": {
     "postinstall": "npm install --prefix mcp-server && npm install --prefix firefox-extension",
