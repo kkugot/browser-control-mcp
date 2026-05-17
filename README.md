@@ -76,6 +76,10 @@ Alternatively, to install a permanent add-on, you can install the [Browser Contr
 
 If you prefer not to run the extension on your personal Firefox browser, an alternative is to download a separate Firefox instance (such as Firefox Developer Edition, available at https://www.mozilla.org/en-US/firefox/developer/).
 
+#### Installing an unsigned XPI locally
+
+Download the `.xpi` from the GitHub Releases page. In Firefox Developer Edition, Nightly, ESR, or enterprise-managed Firefox, open `about:config`, set `xpinstall.signatures.required` to `false`, and if installation is still blocked set `xpinstall.whitelist.required` to `false`. Then open `about:addons` and choose "Install Add-on From File..." from the gear menu. Select the downloaded `.xpi`.
+
 
 #### MCP Server configuration
 
