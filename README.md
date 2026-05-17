@@ -114,6 +114,9 @@ them as build arguments:
 
 ```
 docker build \
+  --build-arg HTTP_PROXY=http://host.docker.internal:8118 \
+  --build-arg HTTPS_PROXY=http://host.docker.internal:8118 \
+  --build-arg NO_PROXY=localhost,127.0.0.1 \
   --build-arg NPM_REGISTRY=https://your-npm-registry.example/repository/npm-all/ \
   --build-arg NPM_STRICT_SSL=false \
   -t browser-control-mcp .
