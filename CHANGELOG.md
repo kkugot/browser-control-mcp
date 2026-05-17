@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.5.5 - 2026-05-17
+
+### Fixed
+
+- Keep the MCP process alive when the configured WebSocket port is already used by another session and return clearer browser-tool guidance instead of a misleading port-change error. ([eyalzh/browser-control-mcp#53](https://github.com/eyalzh/browser-control-mcp/issues/53)) ([eyalzh/browser-control-mcp#37](https://github.com/eyalzh/browser-control-mcp/issues/37))
+- Align the advertised MCP server runtime version with package release metadata.
+
 ## 1.5.4 - 2026-05-17
 
 ### Fixed
