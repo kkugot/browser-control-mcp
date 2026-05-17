@@ -12,7 +12,20 @@ import { isPortInUse } from "./util";
 import * as crypto from "crypto";
 
 const WS_DEFAULT_PORT = 8089;
-const EXTENSION_RESPONSE_TIMEOUT_MS = 1000;
+const EXTENSION_RESPONSE_TIMEOUT_MS = 5000;
+const WS_OPEN_WAIT_TIMEOUT_MS = 10_000;
+const WS_OPEN_POLL_INTERVAL_MS = 100;
+
+// Set BROWSER_MCP_DEBUG=1 (or =true) to enable verbose trace logging
+const DEBUG = ["1", "true"].includes(
+  (process.env.BROWSER_MCP_DEBUG ?? "").toLowerCase()
+);
+
+function trace(...args: unknown[]) {
+  if (DEBUG) {
+    console.error("[browser-mcp:trace]", new Date().toISOString(), ...args);
+  }
+}
 
 interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
   resource: T;
@@ -56,27 +69,74 @@ export class BrowserAPI {
     });
 
     console.error(`Starting WebSocket server on ${host}:${port}`);
-    this.wsServer.on("connection", async (connection) => {
+    trace("WebSocket server binding", { host, port, debug: true });
+
+    this.wsServer.on("connection", async (connection, req) => {
+      const prevState = this.ws ? this.ws.readyState : "none";
       this.ws = connection;
 
       console.error("WebSocket connection established on port", port);
+      trace("Extension connected", {
+        remoteAddress: req.socket.remoteAddress,
+        previousSocketState: prevState,
+        pendingRequests: this.extensionRequestMap.size,
+      });
 
       this.ws.on("message", (message) => {
-        const decoded = JSON.parse(message.toString());
+        let decoded: any;
+        try {
+          decoded = JSON.parse(message.toString());
+        } catch (parseErr) {
+          console.error("Failed to parse extension message:", parseErr);
+          trace("Message parse failure", {
+            rawLength: message.toString().length,
+            error: String(parseErr),
+          });
+          return;
+        }
+
         if (isErrorMessage(decoded)) {
+          trace("Received extension error", {
+            correlationId: decoded.correlationId,
+            errorMessage: decoded.errorMessage,
+          });
           this.handleExtensionError(decoded);
           return;
         }
         const signature = this.createSignature(JSON.stringify(decoded.payload));
         if (signature !== decoded.signature) {
           console.error("Invalid message signature");
+          trace("Signature mismatch", {
+            correlationId: decoded.payload?.correlationId,
+            resource: decoded.payload?.resource,
+          });
           return;
         }
+        trace("Received valid extension message", {
+          correlationId: decoded.payload.correlationId,
+          resource: decoded.payload.resource,
+        });
         this.handleDecodedExtensionMessage(decoded.payload);
+      });
+
+      this.ws.on("close", (code, reason) => {
+        console.error("WebSocket connection closed", { code, reason: reason.toString() });
+        trace("Extension socket closed", {
+          code,
+          reason: reason.toString(),
+          pendingRequests: this.extensionRequestMap.size,
+          pendingCorrelationIds: [...this.extensionRequestMap.keys()],
+        });
+      });
+
+      this.ws.on("error", (error) => {
+        console.error("WebSocket connection error:", error.message);
+        trace("Extension socket error", { error: error.message, stack: error.stack });
       });
     });
     this.wsServer.on("error", (error) => {
       console.error("WebSocket server error:", error);
+      trace("Server-level WS error", { error: String(error) });
     });
   }
 
@@ -89,7 +149,7 @@ export class BrowserAPI {
   }
 
   async openTab(url: string): Promise<number | undefined> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "open-tab",
       url,
     });
@@ -98,7 +158,7 @@ export class BrowserAPI {
   }
 
   async closeTabs(tabIds: number[]) {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "close-tabs",
       tabIds,
     });
@@ -106,7 +166,7 @@ export class BrowserAPI {
   }
 
   async getTabList(): Promise<BrowserTab[]> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "get-tab-list",
     });
     const message = await this.waitForResponse(correlationId, "tabs");
@@ -116,7 +176,7 @@ export class BrowserAPI {
   async getBrowserRecentHistory(
     searchQuery?: string
   ): Promise<BrowserHistoryItem[]> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "get-browser-recent-history",
       searchQuery,
     });
@@ -128,7 +188,7 @@ export class BrowserAPI {
     tabId: number,
     offset: number
   ): Promise<TabContentExtensionMessage> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "get-tab-content",
       tabId,
       offset,
@@ -137,7 +197,7 @@ export class BrowserAPI {
   }
 
   async reorderTabs(tabOrder: number[]): Promise<number[]> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "reorder-tabs",
       tabOrder,
     });
@@ -146,7 +206,7 @@ export class BrowserAPI {
   }
 
   async findHighlight(tabId: number, queryPhrase: string): Promise<number> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "find-highlight",
       tabId,
       queryPhrase,
@@ -164,7 +224,7 @@ export class BrowserAPI {
     groupColor: string,
     groupTitle: string
   ): Promise<number> {
-    const correlationId = this.sendMessageToExtension({
+    const correlationId = await this.sendMessageToExtension({
       cmd: "group-tabs",
       tabIds,
       isCollapsed,
@@ -184,10 +244,13 @@ export class BrowserAPI {
     return hmac.digest("hex");
   }
 
-  private sendMessageToExtension(message: ServerMessage): string {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("WebSocket is not open");
-    }
+  private async sendMessageToExtension(message: ServerMessage): Promise<string> {
+    trace("Preparing to send message to extension", {
+      cmd: message.cmd,
+      wsState: this.ws?.readyState ?? "null",
+    });
+
+    await this.waitForWebSocketOpen();
 
     const correlationId = Math.random().toString(36).substring(2);
     const req: ServerMessageRequest = { ...message, correlationId };
@@ -198,27 +261,96 @@ export class BrowserAPI {
       signature: signature,
     };
 
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      trace("WebSocket closed before send", {
+        cmd: message.cmd,
+        correlationId,
+        wsState: ws?.readyState ?? "null",
+      });
+      throw new Error("WebSocket was closed before sending the message");
+    }
+
     // Send the signed message to the extension
-    this.ws.send(JSON.stringify(signedMessage));
+    ws.send(JSON.stringify(signedMessage));
+    trace("Sent message to extension", { cmd: message.cmd, correlationId });
 
     return correlationId;
   }
 
+  private async waitForWebSocketOpen(): Promise<void> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    trace("Waiting for WebSocket to open", {
+      wsExists: !!this.ws,
+      wsState: this.ws?.readyState ?? "null",
+      timeoutMs: WS_OPEN_WAIT_TIMEOUT_MS,
+    });
+
+    const deadline = Date.now() + WS_OPEN_WAIT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        trace("WebSocket became open after waiting");
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, WS_OPEN_POLL_INTERVAL_MS);
+      });
+    }
+
+    const port = this.getSelectedPort() ?? process.env.EXTENSION_PORT ?? WS_DEFAULT_PORT;
+    trace("WebSocket open timeout reached", {
+      wsExists: !!this.ws,
+      wsState: this.ws?.readyState ?? "null",
+      port,
+    });
+    throw new Error(
+      `WebSocket is not open after ${WS_OPEN_WAIT_TIMEOUT_MS}ms. ` +
+        `Make sure the Firefox extension is installed, running, and configured to use port ${port}.`
+    );
+  }
+
   private handleDecodedExtensionMessage(decoded: ExtensionMessage) {
     const { correlationId } = decoded;
-    const { resolve, resource } = this.extensionRequestMap.get(correlationId)!;
+    const entry = this.extensionRequestMap.get(correlationId);
+    if (!entry) {
+      // Response arrived after timeout or for an unknown correlationId -- safe to ignore
+      console.error("Received response for unknown/expired correlationId:", correlationId);
+      trace("Orphaned extension response (likely timed out)", {
+        correlationId,
+        resource: decoded.resource,
+        pendingKeys: [...this.extensionRequestMap.keys()],
+      });
+      return;
+    }
+    const { resolve, resource } = entry;
     if (resource !== decoded.resource) {
       console.error("Resource mismatch:", resource, decoded.resource);
+      trace("Resource mismatch detail", { correlationId, expected: resource, actual: decoded.resource });
       return;
     }
     this.extensionRequestMap.delete(correlationId);
+    trace("Resolved extension response", { correlationId, resource });
     resolve(decoded);
   }
 
   private handleExtensionError(decoded: ExtensionError) {
     const { correlationId, errorMessage } = decoded;
-    const { reject } = this.extensionRequestMap.get(correlationId)!;
+    const entry = this.extensionRequestMap.get(correlationId);
+    if (!entry) {
+      console.error("Received error for unknown/expired correlationId:", correlationId, errorMessage);
+      trace("Orphaned extension error (likely timed out)", {
+        correlationId,
+        errorMessage,
+        pendingKeys: [...this.extensionRequestMap.keys()],
+      });
+      return;
+    }
+    const { reject } = entry;
     this.extensionRequestMap.delete(correlationId);
+    trace("Rejecting with extension error", { correlationId, errorMessage });
     reject(errorMessage);
   }
 
@@ -234,8 +366,19 @@ export class BrowserAPI {
           reject,
         });
         setTimeout(() => {
-          this.extensionRequestMap.delete(correlationId);
-          reject("Timed out waiting for response");
+          if (this.extensionRequestMap.has(correlationId)) {
+            this.extensionRequestMap.delete(correlationId);
+            trace("Response timeout", {
+              correlationId,
+              resource,
+              timeoutMs: EXTENSION_RESPONSE_TIMEOUT_MS,
+              wsState: this.ws?.readyState ?? "null",
+            });
+            reject(
+              `Timed out waiting for response (resource=${resource}, ` +
+                `timeout=${EXTENSION_RESPONSE_TIMEOUT_MS}ms, correlationId=${correlationId})`
+            );
+          }
         }, EXTENSION_RESPONSE_TIMEOUT_MS);
       }
     );
