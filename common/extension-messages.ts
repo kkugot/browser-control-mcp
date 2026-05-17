@@ -24,6 +24,11 @@ export interface TabsExtensionMessage extends ExtensionMessageBase {
   tabs: BrowserTab[];
 }
 
+export interface TabMetadataExtensionMessage extends ExtensionMessageBase {
+  resource: "tab-metadata";
+  metadata: Record<string, unknown>;
+}
+
 export interface OpenedTabIdExtensionMessage extends ExtensionMessageBase {
   resource: "opened-tab-id";
   tabId: number | undefined;
@@ -68,6 +73,7 @@ export interface CurrentTabExtensionMessage extends ExtensionMessageBase {
 export type ExtensionMessage =
   | TabContentExtensionMessage
   | TabsExtensionMessage
+  | TabMetadataExtensionMessage
   | OpenedTabIdExtensionMessage
   | BrowserHistoryExtensionMessage
   | ReorderedTabsExtensionMessage

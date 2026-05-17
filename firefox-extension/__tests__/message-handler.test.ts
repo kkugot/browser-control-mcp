@@ -37,6 +37,7 @@ describe("MessageHandler", () => {
         "open-browser-tab": true,
         "close-browser-tabs": true,
         "get-list-of-open-tabs": true,
+        "get-tab-metadata": true,
         "get-recent-browser-history": true,
         "get-tab-web-content": true,
         "reorder-browser-tabs": true,
@@ -277,6 +278,38 @@ describe("MessageHandler", () => {
           resource: "current-tab",
           correlationId: "test-correlation-id",
           tab: mockTab,
+        });
+      });
+    });
+
+    describe("get-tab-metadata command", () => {
+      it("should get tab metadata and send it to the server", async () => {
+        // Arrange
+        const request: ServerMessageRequest = {
+          cmd: "get-tab-metadata",
+          tabId: 123,
+          correlationId: "test-correlation-id",
+        };
+
+        const mockTabMetadata = {
+          id: 123,
+          url: "https://example.com",
+          title: "Example Page",
+          active: true,
+          pinned: false,
+          windowId: 1,
+        };
+        (browser.tabs.get as jest.Mock).mockResolvedValue(mockTabMetadata);
+
+        // Act
+        await messageHandler.handleDecodedMessage(request);
+
+        // Assert
+        expect(browser.tabs.get).toHaveBeenCalledWith(123);
+        expect(mockClient.sendResourceToServer).toHaveBeenCalledWith({
+          resource: "tab-metadata",
+          correlationId: "test-correlation-id",
+          metadata: mockTabMetadata,
         });
       });
     });
