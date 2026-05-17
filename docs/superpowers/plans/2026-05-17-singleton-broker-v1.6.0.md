@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Allow many local MCP client processes to control the same browser extension connection on the same port by routing browser operations through one local broker.
+**Goal:** Allow many local MCP client processes configured with the same browser port and pairing key to control that browser extension connection by routing browser operations through one local broker.
 
-**Architecture:** One process becomes the broker/leader and owns the browser extension WebSocket on `EXTENSION_PORT` (default `8089`). Other MCP processes become forwarders: they keep their stdio MCP server alive, authenticate to the broker over a local IPC socket with a broker token, forward browser operations, and return broker responses to their own clients. The implementation is intentionally scoped to one browser/one port/one pairing secret; future multi-browser support can add per-browser broker identity without changing the tool API.
+**Architecture:** One process becomes the broker/leader for a specific browser identity, where identity is derived from `EXTENSION_PORT` plus a hash of `EXTENSION_SECRET`. Other MCP processes with the same port and key become forwarders: they keep their stdio MCP server alive, authenticate to the broker over a local IPC socket with a broker token, forward browser operations, and return broker responses to their own clients. Different browsers are supported by configuring them with different ports and different pairing keys, which produces separate broker metadata and socket paths.
 
 **Tech Stack:** Node.js 22, TypeScript strict mode, `net` Unix domain sockets on macOS/Linux, Windows named pipes, existing `BrowserAPI`, Node built-in test runner for `mcp-server`, Jest for extension regression checks.
 
@@ -12,7 +12,9 @@
 
 ## Design Decisions
 
-- Use a local broker, not many MCP processes bound to the same TCP port. Only one process can own `8089`.
+- Use a local broker per browser identity, not many MCP processes bound to the same TCP port. Only one process can own a specific browser extension port.
+- Derive broker identity from `EXTENSION_PORT` and a short SHA-256 hash of `EXTENSION_SECRET`. Never write the raw extension secret into broker metadata.
+- Treat additional browsers as separate broker identities configured with different ports and pairing keys.
 - Keep the Firefox extension unchanged. It still connects to one local WebSocket listener.
 - Use a transport boundary so `BrowserAPI` does not own all responsibilities forever.
 - Authenticate IPC with a random broker token written to a `0600` metadata file under a `0700` cache directory.
@@ -26,6 +28,7 @@
 - Create `mcp-server/browser-operations.ts`: shared operation names, argument/result dispatch types, runtime operation whitelist.
 - Create `mcp-server/browser-transport.ts`: `BrowserTransport` interface, `DirectBrowserTransport`, `ForwardingBrowserTransport`.
 - Create `mcp-server/singleton-broker.ts`: cache paths, metadata, token generation, socket path selection, broker IPC server/client, liveness ping.
+- Broker metadata and sockets are keyed by `EXTENSION_PORT` plus a hash of `EXTENSION_SECRET`, so browsers configured with different ports and keys do not collide.
 - Modify `mcp-server/browser-api.ts`: become a facade over a selected `BrowserTransport` while preserving public methods.
 - Modify `mcp-server/__tests__/browser-api.test.mjs`: update/extend tests for broker guidance and operation whitelist.
 - Create `mcp-server/__tests__/singleton-broker.test.mjs`: tests for metadata, token auth, IPC ping and forwarding.
@@ -134,10 +137,31 @@ import test from "node:test";
 
 import broker from "../dist/singleton-broker.js";
 
-test("broker paths are scoped to the user cache directory", () => {
+test("broker paths are scoped by port and extension secret hash", () => {
   const directory = broker.getBrokerDirectory();
+  const identity = broker.createBrokerIdentity({ port: 8089, extensionSecret: "secret-a" });
+
   assert.equal(directory, path.join(os.homedir(), ".cache", "browser-control-mcp"));
-  assert.equal(broker.getBrokerInfoPath(), path.join(directory, "leader.json"));
+  assert.match(identity.secretHash, /^[a-f0-9]{16}$/);
+  assert.equal(identity.id, `8089-${identity.secretHash}`);
+  assert.equal(broker.getBrokerInfoPath(identity), path.join(directory, `leader-${identity.id}.json`));
+
+  if (process.platform === "win32") {
+    assert.equal(broker.getBrokerSocketPath(identity), `\\\\.\\pipe\\browser-control-mcp-${identity.id}`);
+  } else {
+    assert.equal(broker.getBrokerSocketPath(identity), path.join(directory, `leader-${identity.id}.sock`));
+  }
+});
+
+test("broker identity changes when browser port or key changes", () => {
+  const first = broker.createBrokerIdentity({ port: 8089, extensionSecret: "secret-a" });
+  const same = broker.createBrokerIdentity({ port: 8089, extensionSecret: "secret-a" });
+  const differentPort = broker.createBrokerIdentity({ port: 8090, extensionSecret: "secret-a" });
+  const differentSecret = broker.createBrokerIdentity({ port: 8089, extensionSecret: "secret-b" });
+
+  assert.deepEqual(first, same);
+  assert.notEqual(first.id, differentPort.id);
+  assert.notEqual(first.id, differentSecret.id);
 });
 
 test("broker token generation returns a non-empty random string", () => {
@@ -149,19 +173,20 @@ test("broker token generation returns a non-empty random string", () => {
 });
 
 test("broker metadata round trips through disk", () => {
+  const identity = broker.createBrokerIdentity({ port: 8089, extensionSecret: "secret-a" });
   const info = {
     pid: process.pid,
-    port: 8089,
-    socketPath: broker.getBrokerSocketPath(8089),
+    identity,
+    socketPath: broker.getBrokerSocketPath(identity),
     token: broker.createBrokerToken(),
     protocolVersion: 1,
     startedAt: 123,
   };
 
   broker.writeBrokerInfo(info);
-  assert.deepEqual(broker.readBrokerInfo(), info);
+  assert.deepEqual(broker.readBrokerInfo(identity), info);
   broker.clearBrokerInfo(info);
-  assert.equal(broker.readBrokerInfo(), null);
+  assert.equal(broker.readBrokerInfo(identity), null);
 });
 ```
 
@@ -183,9 +208,15 @@ import path from "node:path";
 
 export const BROKER_PROTOCOL_VERSION = 1;
 
+export interface BrokerIdentity {
+  id: string;
+  port: number;
+  secretHash: string;
+}
+
 export interface BrokerInfo {
   pid: number;
-  port: number;
+  identity: BrokerIdentity;
   socketPath: string;
   token: string;
   protocolVersion: number;
@@ -196,15 +227,28 @@ export function getBrokerDirectory(): string {
   return path.join(os.homedir(), ".cache", "browser-control-mcp");
 }
 
-export function getBrokerInfoPath(): string {
-  return path.join(getBrokerDirectory(), "leader.json");
+export function createBrokerIdentity(options: { port: number; extensionSecret: string }): BrokerIdentity {
+  const secretHash = crypto
+    .createHash("sha256")
+    .update(options.extensionSecret)
+    .digest("hex")
+    .slice(0, 16);
+  return {
+    id: `${options.port}-${secretHash}`,
+    port: options.port,
+    secretHash,
+  };
 }
 
-export function getBrokerSocketPath(port: number): string {
+export function getBrokerInfoPath(identity: BrokerIdentity): string {
+  return path.join(getBrokerDirectory(), `leader-${identity.id}.json`);
+}
+
+export function getBrokerSocketPath(identity: BrokerIdentity): string {
   if (process.platform === "win32") {
-    return `\\\\.\\pipe\\browser-control-mcp-${port}`;
+    return `\\\\.\\pipe\\browser-control-mcp-${identity.id}`;
   }
-  return path.join(getBrokerDirectory(), `leader-${port}.sock`);
+  return path.join(getBrokerDirectory(), `leader-${identity.id}.sock`);
 }
 
 export function ensureBrokerDirectory(): void {
@@ -217,24 +261,27 @@ export function createBrokerToken(): string {
 
 export function writeBrokerInfo(info: BrokerInfo): void {
   ensureBrokerDirectory();
-  fs.writeFileSync(getBrokerInfoPath(), JSON.stringify(info), { mode: 0o600 });
+  fs.writeFileSync(getBrokerInfoPath(info.identity), JSON.stringify(info), { mode: 0o600 });
 }
 
-export function readBrokerInfo(): BrokerInfo | null {
+export function readBrokerInfo(identity: BrokerIdentity): BrokerInfo | null {
   try {
-    return JSON.parse(fs.readFileSync(getBrokerInfoPath(), "utf8")) as BrokerInfo;
+    return JSON.parse(fs.readFileSync(getBrokerInfoPath(identity), "utf8")) as BrokerInfo;
   } catch {
     return null;
   }
 }
 
 export function clearBrokerInfo(expected?: BrokerInfo): void {
-  const current = readBrokerInfo();
+  if (!expected) {
+    return;
+  }
+  const current = readBrokerInfo(expected.identity);
   if (expected && current && current.token !== expected.token) {
     return;
   }
   try {
-    fs.unlinkSync(getBrokerInfoPath());
+    fs.unlinkSync(getBrokerInfoPath(expected.identity));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;
@@ -271,7 +318,8 @@ Append to `mcp-server/__tests__/singleton-broker.test.mjs`:
 ```js
 test("broker IPC requires the broker token and forwards operations", async () => {
   const token = broker.createBrokerToken();
-  const socketPath = broker.getBrokerSocketPath(18089);
+  const identity = broker.createBrokerIdentity({ port: 18089, extensionSecret: "secret-a" });
+  const socketPath = broker.getBrokerSocketPath(identity);
   const server = broker.createBrokerServer({
     socketPath,
     token,
@@ -527,6 +575,8 @@ test("port-in-use guidance points to broker forwarding", () => {
   assert.match(message, /port 8089/i);
   assert.match(message, /broker/i);
   assert.match(message, /forward/i);
+  assert.match(message, /EXTENSION_PORT/i);
+  assert.match(message, /EXTENSION_SECRET/i);
   assert.doesNotMatch(message, /unavailable in this session/i);
 });
 ```
@@ -545,6 +595,18 @@ Modify `mcp-server/browser-api.ts`:
 const BROKER_REQUEST_TIMEOUT_MS = 15_000;
 ```
 
+Update `buildPortInUseMessage()`:
+
+```ts
+export function buildPortInUseMessage(port: number): string {
+  return (
+    `browser-control: port ${port} is already in use, likely by another MCP client session. ` +
+    "No live broker responded for this EXTENSION_PORT and EXTENSION_SECRET, so forwarding could not start. " +
+    "If this is a different browser, configure it with a different EXTENSION_PORT and EXTENSION_SECRET."
+  );
+}
+```
+
 Add fields:
 
 ```ts
@@ -555,11 +617,13 @@ private brokerServer: ReturnType<typeof createBrokerServer> | null = null;
 Replace the port-in-use branch in `init()`:
 
 ```ts
+const identity = createBrokerIdentity({ port, extensionSecret: secret });
+
 if (await isPortInUse(port)) {
-  const brokerInfo = readBrokerInfo();
+  const brokerInfo = readBrokerInfo(identity);
   if (brokerInfo && await pingBroker({ socketPath: brokerInfo.socketPath, token: brokerInfo.token, timeoutMs: 1000 })) {
     this.brokerInfo = brokerInfo;
-    console.error(`browser-control: forwarding browser tools to broker process ${brokerInfo.pid}`);
+    console.error(`browser-control: forwarding browser tools for ${identity.id} to broker process ${brokerInfo.pid}`);
     return;
   }
   this.unavailableReason = buildPortInUseMessage(port);
@@ -572,8 +636,8 @@ After direct WebSocket servers start:
 
 ```ts
 const token = createBrokerToken();
-const socketPath = getBrokerSocketPath(port);
-const info = { pid: process.pid, port, socketPath, token, protocolVersion: BROKER_PROTOCOL_VERSION, startedAt: Date.now() };
+const socketPath = getBrokerSocketPath(identity);
+const info = { pid: process.pid, identity, socketPath, token, protocolVersion: BROKER_PROTOCOL_VERSION, startedAt: Date.now() };
 this.brokerServer = createBrokerServer({
   socketPath,
   token,
@@ -655,7 +719,7 @@ Insert at top of `CHANGELOG.md`:
 
 ### Added
 
-- Add singleton broker/forwarder mode so many local MCP client sessions can share one browser extension WebSocket connection on the same port. ([eyalzh/browser-control-mcp#53](https://github.com/eyalzh/browser-control-mcp/issues/53))
+- Add singleton broker/forwarder mode so many local MCP client sessions configured with the same browser port and pairing key can share one browser extension WebSocket connection. Different browsers can use different ports and keys to get separate brokers. ([eyalzh/browser-control-mcp#53](https://github.com/eyalzh/browser-control-mcp/issues/53))
 ```
 
 - [ ] **Step 3: Full verification**
@@ -693,13 +757,13 @@ PR body must include:
 - Primary upstream issue: eyalzh/browser-control-mcp#53
 
 ### Summary
-Adds a singleton local broker so many MCP client processes can share one browser extension WebSocket connection on the same port.
+Adds a singleton local broker so many MCP client processes configured with the same browser port and pairing key can share one browser extension WebSocket connection. Browsers configured with different ports and keys use separate broker identities.
 ```
 
 ---
 
 ## Self-Review
 
-- Spec coverage: The plan covers many clients, one browser, same port, private broker token, broker/forwarder split, operation whitelist, IPC auth, timeout behavior, and release to `1.6.0`.
+- Spec coverage: The plan covers many clients sharing one browser identity, separate browser identities by port plus extension-secret hash, private broker token, broker/forwarder split, operation whitelist, IPC auth, timeout behavior, and release to `1.6.0`.
 - Placeholder scan: No TBD/TODO placeholders remain.
 - Type consistency: `BrowserApiOperation`, broker request operation names, and public `BrowserAPI` methods use the same names.

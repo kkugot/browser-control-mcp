@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.6.0 - 2026-05-17
+
+### Added
+
+- Add singleton broker/forwarder mode so many local MCP client sessions configured with the same browser port and pairing key can share one browser extension WebSocket connection. Different browsers can use different ports and keys to get separate brokers. ([eyalzh/browser-control-mcp#53](https://github.com/eyalzh/browser-control-mcp/issues/53))
+
 ## 1.5.8 - 2026-05-17
 
 ### Added

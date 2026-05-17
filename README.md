@@ -102,6 +102,12 @@ Set the EXTENSION_SECRET to the value shown on the extension's preferences page 
 
 It might take a few seconds for the MCP server to connect to the extension.
 
+##### Multiple MCP clients and browsers
+
+Browser Control MCP supports a local singleton broker mode. The first MCP server process configured for a browser opens the WebSocket connection to the Firefox extension and becomes the local broker. Additional MCP server processes with the same `EXTENSION_PORT` and `EXTENSION_SECRET` automatically forward browser tool calls to that broker, so multiple AI clients can share the same browser session without port conflicts.
+
+To use a separate browser profile or a different Firefox installation, configure that browser extension with a different port and secret, then use those values in that MCP client's environment. Broker identity is based on `EXTENSION_PORT` plus a hash of `EXTENSION_SECRET`, so different browser port/key pairs stay isolated.
+
 ##### Configure the MCP server with Docker
 
 Alternatively, you can use a Docker-based configuration. To do so, build the mcp-server Docker image:
