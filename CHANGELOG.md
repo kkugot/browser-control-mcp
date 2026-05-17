@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.5.8 - 2026-05-17
+
+### Added
+
+- Add `get-tab-metadata` MCP tool to return comprehensive Firefox tab properties for a specific tab. ([eyalzh/browser-control-mcp#41](https://github.com/eyalzh/browser-control-mcp/pull/41))
+
 ## 1.5.7 - 2026-05-17
 
 ### Added

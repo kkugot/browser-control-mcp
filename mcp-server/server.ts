@@ -9,7 +9,7 @@ dayjs.extend(relativeTime);
 
 const mcpServer = new McpServer({
   name: "BrowserControl",
-  version: "1.5.7",
+  version: "1.5.8",
 });
 
 mcpServer.tool(
@@ -99,6 +99,23 @@ mcpServer.tool(
         {
           type: "text",
           text: `Current tab: id=${currentTab.id}, url=${currentTab.url}, title=${currentTab.title}`,
+        },
+      ],
+    };
+  }
+);
+
+mcpServer.tool(
+  "get-tab-metadata",
+  "Get comprehensive metadata about a specific tab, including state, position, window, audio, dimensions, favicon, and last access properties when available.",
+  { tabId: z.number() },
+  async ({ tabId }) => {
+    const metadata = await browserApi.getTabMetadata(tabId);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(metadata, null, 2),
         },
       ],
     };
