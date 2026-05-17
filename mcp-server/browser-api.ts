@@ -27,6 +27,10 @@ function trace(...args: unknown[]) {
   }
 }
 
+export function getWebSocketHosts(isContainerized: boolean): string[] {
+  return isContainerized ? ["0.0.0.0"] : ["127.0.0.1", "::1"];
+}
+
 interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
   resource: T;
   resolve: (value: Extract<ExtensionMessage, { resource: T }>) => void;
@@ -35,7 +39,7 @@ interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
 
 export class BrowserAPI {
   private ws: WebSocket | null = null;
-  private wsServer: WebSocket.Server | null = null;
+  private wsServers: WebSocket.Server[] = [];
   private sharedSecret: string | null = null;
 
   // Map to persist the request to the extension. It maps the request correlationId
@@ -60,92 +64,96 @@ export class BrowserAPI {
       );
     }
 
-    // Unless running in a container, bind to localhost only
-    const host = process.env.CONTAINERIZED ? "0.0.0.0" : "localhost";
-
-    this.wsServer = new WebSocket.Server({
-      host,
-      port,
-    });
-
-    console.error(`Starting WebSocket server on ${host}:${port}`);
-    trace("WebSocket server binding", { host, port, debug: true });
-
-    this.wsServer.on("connection", async (connection, req) => {
-      const prevState = this.ws ? this.ws.readyState : "none";
-      this.ws = connection;
-
-      console.error("WebSocket connection established on port", port);
-      trace("Extension connected", {
-        remoteAddress: req.socket.remoteAddress,
-        previousSocketState: prevState,
-        pendingRequests: this.extensionRequestMap.size,
+    for (const host of getWebSocketHosts(Boolean(process.env.CONTAINERIZED))) {
+      const wsServer = new WebSocket.Server({
+        host,
+        port,
       });
 
-      this.ws.on("message", (message) => {
-        let decoded: any;
-        try {
-          decoded = JSON.parse(message.toString());
-        } catch (parseErr) {
-          console.error("Failed to parse extension message:", parseErr);
-          trace("Message parse failure", {
-            rawLength: message.toString().length,
-            error: String(parseErr),
-          });
-          return;
-        }
+      console.error(`Starting WebSocket server on ${host}:${port}`);
+      trace("WebSocket server binding", { host, port, debug: true });
 
-        if (isErrorMessage(decoded)) {
-          trace("Received extension error", {
-            correlationId: decoded.correlationId,
-            errorMessage: decoded.errorMessage,
-          });
-          this.handleExtensionError(decoded);
-          return;
-        }
-        const signature = this.createSignature(JSON.stringify(decoded.payload));
-        if (signature !== decoded.signature) {
-          console.error("Invalid message signature");
-          trace("Signature mismatch", {
-            correlationId: decoded.payload?.correlationId,
-            resource: decoded.payload?.resource,
-          });
-          return;
-        }
-        trace("Received valid extension message", {
-          correlationId: decoded.payload.correlationId,
-          resource: decoded.payload.resource,
-        });
-        this.handleDecodedExtensionMessage(decoded.payload);
-      });
+      wsServer.on("connection", async (connection, req) => {
+        const prevState = this.ws ? this.ws.readyState : "none";
+        this.ws = connection;
 
-      this.ws.on("close", (code, reason) => {
-        console.error("WebSocket connection closed", { code, reason: reason.toString() });
-        trace("Extension socket closed", {
-          code,
-          reason: reason.toString(),
+        console.error("WebSocket connection established on port", port);
+        trace("Extension connected", {
+          remoteAddress: req.socket.remoteAddress,
+          previousSocketState: prevState,
           pendingRequests: this.extensionRequestMap.size,
-          pendingCorrelationIds: [...this.extensionRequestMap.keys()],
+        });
+
+        this.ws.on("message", (message) => {
+          let decoded: any;
+          try {
+            decoded = JSON.parse(message.toString());
+          } catch (parseErr) {
+            console.error("Failed to parse extension message:", parseErr);
+            trace("Message parse failure", {
+              rawLength: message.toString().length,
+              error: String(parseErr),
+            });
+            return;
+          }
+
+          if (isErrorMessage(decoded)) {
+            trace("Received extension error", {
+              correlationId: decoded.correlationId,
+              errorMessage: decoded.errorMessage,
+            });
+            this.handleExtensionError(decoded);
+            return;
+          }
+          const signature = this.createSignature(JSON.stringify(decoded.payload));
+          if (signature !== decoded.signature) {
+            console.error("Invalid message signature");
+            trace("Signature mismatch", {
+              correlationId: decoded.payload?.correlationId,
+              resource: decoded.payload?.resource,
+            });
+            return;
+          }
+          trace("Received valid extension message", {
+            correlationId: decoded.payload.correlationId,
+            resource: decoded.payload.resource,
+          });
+          this.handleDecodedExtensionMessage(decoded.payload);
+        });
+
+        this.ws.on("close", (code, reason) => {
+          console.error("WebSocket connection closed", { code, reason: reason.toString() });
+          trace("Extension socket closed", {
+            code,
+            reason: reason.toString(),
+            pendingRequests: this.extensionRequestMap.size,
+            pendingCorrelationIds: [...this.extensionRequestMap.keys()],
+          });
+        });
+
+        this.ws.on("error", (error) => {
+          console.error("WebSocket connection error:", error.message);
+          trace("Extension socket error", { error: error.message, stack: error.stack });
         });
       });
-
-      this.ws.on("error", (error) => {
-        console.error("WebSocket connection error:", error.message);
-        trace("Extension socket error", { error: error.message, stack: error.stack });
+      wsServer.on("error", (error) => {
+        console.error(`WebSocket server error on ${host}:${port}:`, error);
+        trace("Server-level WS error", { host, port, error: String(error) });
       });
-    });
-    this.wsServer.on("error", (error) => {
-      console.error("WebSocket server error:", error);
-      trace("Server-level WS error", { error: String(error) });
-    });
+
+      this.wsServers.push(wsServer);
+    }
   }
 
   close() {
-    this.wsServer?.close();
+    for (const wsServer of this.wsServers) {
+      wsServer.close();
+    }
+    this.wsServers = [];
   }
 
   getSelectedPort() {
-    return this.wsServer?.options.port;
+    return this.wsServers[0]?.options.port;
   }
 
   async openTab(url: string): Promise<number | undefined> {

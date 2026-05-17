@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.5.3 - 2026-05-17
+
+### Fixed
+
+- Bind the WebSocket server to both `127.0.0.1` and `::1` outside containers so Firefox can connect regardless of IPv4/IPv6 localhost resolution order. ([#51](https://github.com/eyalzh/browser-control-mcp/issues/51))
+
 ## 1.5.2 - 2026-05-17
 
 ### Changed
