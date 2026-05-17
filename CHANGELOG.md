@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.5.7 - 2026-05-17
+
+### Added
+
+- Add `get-current-tab` MCP tool to return the active browser tab in the current window. ([eyalzh/browser-control-mcp#44](https://github.com/eyalzh/browser-control-mcp/pull/44))
+
 ## 1.5.6 - 2026-05-17
 
 ### Fixed

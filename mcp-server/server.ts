@@ -9,7 +9,7 @@ dayjs.extend(relativeTime);
 
 const mcpServer = new McpServer({
   name: "BrowserControl",
-  version: "1.5.6",
+  version: "1.5.7",
 });
 
 mcpServer.tool(
@@ -84,6 +84,23 @@ mcpServer.tool(
 
     return {
       content: [paginationInfo, ...tabContent],
+    };
+  }
+);
+
+mcpServer.tool(
+  "get-current-tab",
+  "Get information about the currently active tab in the browser",
+  {},
+  async () => {
+    const currentTab = await browserApi.getCurrentTab();
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Current tab: id=${currentTab.id}, url=${currentTab.url}, title=${currentTab.title}`,
+        },
+      ],
     };
   }
 );

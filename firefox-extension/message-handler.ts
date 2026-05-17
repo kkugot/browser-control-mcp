@@ -60,6 +60,9 @@ export class MessageHandler {
           req.groupTitle
         );
         break;
+      case "get-current-tab":
+        await this.sendCurrentTab(req.correlationId);
+        break;
       default:
         const _exhaustiveCheck: never = req;
         console.error("Invalid message received:", req);
@@ -130,6 +133,15 @@ export class MessageHandler {
       resource: "tabs",
       correlationId,
       tabs,
+    });
+  }
+
+  private async sendCurrentTab(correlationId: string): Promise<void> {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    await this.client.sendResourceToServer({
+      resource: "current-tab",
+      correlationId,
+      tab: tabs[0],
     });
   }
 

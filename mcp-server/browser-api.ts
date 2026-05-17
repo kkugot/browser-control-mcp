@@ -189,6 +189,14 @@ export class BrowserAPI {
     return message.tabs;
   }
 
+  async getCurrentTab(): Promise<BrowserTab> {
+    const correlationId = await this.sendMessageToExtension({
+      cmd: "get-current-tab",
+    });
+    const message = await this.waitForResponse(correlationId, "current-tab");
+    return message.tab;
+  }
+
   async getBrowserRecentHistory(
     searchQuery?: string
   ): Promise<BrowserHistoryItem[]> {
