@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.5.4 - 2026-05-17
+
+### Fixed
+
+- Truncate oversized `get-tab-web-content` responses before sending them over WebSocket to reduce crashes on heavy DOM pages. ([eyalzh/browser-control-mcp#54](https://github.com/eyalzh/browser-control-mcp/issues/54))
+
 ## 1.5.3 - 2026-05-17
 
 ### Fixed

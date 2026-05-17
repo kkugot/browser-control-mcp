@@ -1,6 +1,12 @@
-import type { ServerMessageRequest } from "@browser-control-mcp/common";
+import type {
+  ServerMessageRequest,
+  TabContentExtensionMessage,
+} from "@browser-control-mcp/common";
 import { WebsocketClient } from "./client";
 import { isCommandAllowed, isDomainInDenyList, COMMAND_TO_TOOL_ID, addAuditLogEntry } from "./extension-config";
+
+const MAX_CONTENT_LENGTH = 50_000;
+const MAX_TAB_CONTENT_RESPONSE_LENGTH = 2_000_000;
 
 export class MessageHandler {
   private client: WebsocketClient;
@@ -204,7 +210,6 @@ export class MessageHandler {
 
     await this.checkForUrlPermission(tab.url);
 
-    const MAX_CONTENT_LENGTH = 50_000;
     const results = await browser.tabs.executeScript(tabId, {
       code: `
       (function () {
@@ -240,7 +245,7 @@ export class MessageHandler {
     `,
     });
     const { isTruncated, fullText, links, totalLength } = results[0];
-    await this.client.sendResourceToServer({
+    const message = this.truncateTabContentMessage({
       resource: "tab-content",
       tabId,
       correlationId,
@@ -249,6 +254,46 @@ export class MessageHandler {
       links,
       totalLength,
     });
+    await this.client.sendResourceToServer(message);
+  }
+
+  private truncateTabContentMessage(
+    message: TabContentExtensionMessage
+  ): TabContentExtensionMessage {
+    const serializedLength = JSON.stringify(message).length;
+    if (serializedLength <= MAX_TAB_CONTENT_RESPONSE_LENGTH) {
+      return message;
+    }
+
+    const marker = `\n\n[Browser Control MCP: truncated response; original serialized length was ${serializedLength} characters]`;
+    const truncateFullText = (
+      candidate: TabContentExtensionMessage
+    ): TabContentExtensionMessage => {
+      const overhead = JSON.stringify({ ...candidate, fullText: "" }).length;
+      const maxTextLength = Math.max(
+        0,
+        MAX_TAB_CONTENT_RESPONSE_LENGTH - overhead - marker.length
+      );
+      return {
+        ...candidate,
+        fullText: `${message.fullText.substring(0, maxTextLength)}${marker}`,
+      };
+    };
+
+    let truncated = truncateFullText({ ...message, isTruncated: true });
+    if (JSON.stringify(truncated).length <= MAX_TAB_CONTENT_RESPONSE_LENGTH) {
+      return truncated;
+    }
+
+    truncated = truncateFullText({ ...message, isTruncated: true, links: [] });
+    if (JSON.stringify(truncated).length <= MAX_TAB_CONTENT_RESPONSE_LENGTH) {
+      return truncated;
+    }
+
+    return {
+      ...truncated,
+      fullText: marker,
+    };
   }
 
   private async reorderTabs(
