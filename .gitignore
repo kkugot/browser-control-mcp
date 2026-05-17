@@ -48,6 +48,9 @@ dist
 
 .nx
 
+# Git worktrees
+.worktrees/
+
 # DXT
 *.dxt
 
